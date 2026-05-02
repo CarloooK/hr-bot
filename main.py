@@ -112,7 +112,7 @@ class Handler(CallbackHandler):
                 return AckMessage.STATUS_OK, "noat"
             if not q:
                 return AckMessage.STATUS_OK, "empty"
-        logger.info('>>> 消息 from=%s q=%s', sid, q)
+            logger.info('>>> 消息 from=%s q=%s', sid, q)
             f = _loop.create_future()
             asyncio.run_coroutine_threadsafe(_enqueue(f, sid, wh, q), _loop)
             _increment_msg_counter()
@@ -162,6 +162,18 @@ async def get_stats():
         'total_messages': _msg_counter,
         'queue_size': len(_waiting_tasks),
     }
+
+
+@app.get('/api/config')
+async def get_config():
+    from config import CHROMA_DB_DIR, COLLECTION_NAME
+    return {
+        'host': HOST,
+        'port': PORT,
+        'chroma_db_dir': CHROMA_DB_DIR,
+        'collection_name': COLLECTION_NAME,
+    }
+
 
 @app.get("/debug/docs")
 async def debug_docs():
