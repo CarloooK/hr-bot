@@ -48,6 +48,9 @@ logger = logging.getLogger("hr-bot")
 
 app = FastAPI(title="HR Bot")
 
+# ── 版本信息 ─────────────────────────────────────
+APP_VERSION = "1.0.0"
+
 import time as _time_module
 
 _queue_lock = asyncio.Lock()
@@ -153,6 +156,11 @@ async def shutdown():
 @app.get('/health')
 async def health():
     return {'status': 'ok', 'service': 'hr-bot', 'queue_size': len(_waiting_tasks)}
+
+
+@app.get('/api/version')
+async def get_version():
+    return {'version': APP_VERSION}
 
 
 @app.get('/api/stats')
