@@ -65,7 +65,7 @@ def _increment_msg_counter():
     _msg_counter += 1
 
 
-# ── Queue processor ───────────────────────────────────
+# ── Queue processor (队列处理协程) ─────────────────────
 async def _process_queue():
     while True:
         task_info = None
