@@ -21,7 +21,7 @@ from dingtalk_stream.chatbot import ChatbotMessage
 from config import DINGTALK_APP_KEY, DINGTALK_APP_SECRET, HOST, PORT, LOG_MAX_BYTES, LOG_BACKUP_COUNT
 from rag_engine import ask
 
-# ── 日志配置（文件轮转 + 控制台） ─────────────────────────
+# ── Logging (file rotation + console) ────────────────────────
 _log_dir = Path(__file__).parent / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -48,7 +48,7 @@ logger = logging.getLogger("hr-bot")
 
 app = FastAPI(title="HR Bot")
 
-# ── 版本信息 ─────────────────────────────────────
+# ── App version ──────────────────────────────────
 APP_VERSION = "1.0.0"
 
 import time as _time_module
