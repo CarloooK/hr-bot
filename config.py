@@ -37,6 +37,10 @@ DINGTALK_APP_SECRET = os.getenv("DINGTALK_APP_SECRET")
 # ngrok token（可选）
 NGROK_AUTH_TOKEN = os.getenv("NGROK_AUTH_TOKEN", "")
 
+# 日志轮转配置
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", "10485760"))      # 默认 10 MB
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))      # 默认保留 5 个备份
+
 # ── 启动时校验必要凭据 ─────────────────────────────────────
 
 _REQUIRED = {"DEEPSEEK_API_KEY": DEEPSEEK_API_KEY}

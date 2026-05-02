@@ -18,7 +18,7 @@ import dingtalk_stream
 from dingtalk_stream import AckMessage, CallbackHandler, CallbackMessage
 from dingtalk_stream.chatbot import ChatbotMessage
 
-from config import DINGTALK_APP_KEY, DINGTALK_APP_SECRET, HOST, PORT
+from config import DINGTALK_APP_KEY, DINGTALK_APP_SECRET, HOST, PORT, LOG_MAX_BYTES, LOG_BACKUP_COUNT
 from rag_engine import ask
 
 # ── 日志配置（文件轮转 + 控制台） ─────────────────────────
@@ -27,8 +27,8 @@ _log_dir.mkdir(parents=True, exist_ok=True)
 
 _file_handler = logging.handlers.RotatingFileHandler(
     _log_dir / "server.log",
-    maxBytes=10 * 1024 * 1024,  # 10 MB
-    backupCount=5,
+    maxBytes=LOG_MAX_BYTES,  # 10 MB
+    backupCount=LOG_BACKUP_COUNT,
     encoding="utf-8",
 )
 _file_handler.setFormatter(logging.Formatter(
