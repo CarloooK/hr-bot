@@ -48,9 +48,18 @@ logger = logging.getLogger("hr-bot")
 
 app = FastAPI(title="HR Bot")
 
+import time as _time_module
+
 _queue_lock = asyncio.Lock()
 _waiting_tasks = []
 _loop = None
+_start_time = _time_module.time()
+_msg_counter = 0
+
+
+def _increment_msg_counter():
+    global _msg_counter
+    _msg_counter += 1
 
 
 async def _process_queue():
@@ -103,12 +112,13 @@ class Handler(CallbackHandler):
                 return AckMessage.STATUS_OK, "noat"
             if not q:
                 return AckMessage.STATUS_OK, "empty"
-            logger.info(">>> 消息 from=%s q=%s", sid, q)
+        logger.info('>>> 消息 from=%s q=%s', sid, q)
             f = _loop.create_future()
             asyncio.run_coroutine_threadsafe(_enqueue(f, sid, wh, q), _loop)
+            _increment_msg_counter()
         except Exception as e:
-            logger.error("E: %s\n%s", e, traceback.format_exc())
-        return AckMessage.STATUS_OK, "OK"
+            logger.error('E: %s\n%s', e, traceback.format_exc())
+        return AckMessage.STATUS_OK, 'OK'
 
 
 async def _enqueue(f, sid, wh, q):
@@ -140,9 +150,18 @@ async def shutdown():
     logger.info("HR Bot 已停止")
 
 
-@app.get("/health")
+@app.get('/health')
 async def health():
-    return {"status": "ok", "service": "hr-bot", "queue_size": len(_waiting_tasks)}
+    return {'status': 'ok', 'service': 'hr-bot', 'queue_size': len(_waiting_tasks)}
+
+
+@app.get('/api/stats')
+async def get_stats():
+    return {
+        'uptime_seconds': int(_time_module.time() - _start_time),
+        'total_messages': _msg_counter,
+        'queue_size': len(_waiting_tasks),
+    }
 
 @app.get("/debug/docs")
 async def debug_docs():
