@@ -8,3 +8,4 @@ pydantic>=2.0.0
 python-multipart>=0.0.6
 dingtalk-stream>=0.24.0
 pytest>=8.0.0
+markitdown[pdf,docx,pptx]>=0.1.0

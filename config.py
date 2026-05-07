@@ -16,8 +16,10 @@ LLM_MODEL = "deepseek-chat"
 CHROMA_DB_DIR = os.path.join(os.path.dirname(__file__), "db")
 COLLECTION_NAME = "hr_docs"
 
-# 文档目录
+# 文档目录（源文件）
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+# 预处理后的 Markdown 目录（ingest 从此读取）
+DOCS_MD_DIR = os.path.join(os.path.dirname(__file__), "docs_md")
 
 # 分块参数
 CHUNK_SIZE = 500
@@ -42,15 +44,16 @@ LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", "10485760"))      # 默认 10 MB
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))      # 默认保留 5 个备份
 
 # ── 启动时校验必要凭据 ─────────────────────────────────────
+# 注意：preprocess.py 等工具脚本无需 API Key，通过设置 SKIP_CONFIG_CHECK 跳过校验
 
-_REQUIRED = {"DEEPSEEK_API_KEY": DEEPSEEK_API_KEY}
-if DINGTALK_APP_KEY or DINGTALK_APP_SECRET:
-    # 只在使用钉钉时才需要
-    _REQUIRED["DINGTALK_APP_KEY"] = DINGTALK_APP_KEY
-    _REQUIRED["DINGTALK_APP_SECRET"] = DINGTALK_APP_SECRET
+if not os.environ.get("SKIP_CONFIG_CHECK"):
+    _REQUIRED = {"DEEPSEEK_API_KEY": DEEPSEEK_API_KEY}
+    if DINGTALK_APP_KEY or DINGTALK_APP_SECRET:
+        _REQUIRED["DINGTALK_APP_KEY"] = DINGTALK_APP_KEY
+        _REQUIRED["DINGTALK_APP_SECRET"] = DINGTALK_APP_SECRET
 
-_MISSING = [k for k, v in _REQUIRED.items() if not v]
-if _MISSING:
-    raise RuntimeError(
-        f"必要环境变量未设置: {', '.join(_MISSING)}。请在 .env 文件中配置。"
-    )
+    _MISSING = [k for k, v in _REQUIRED.items() if not v]
+    if _MISSING:
+        raise RuntimeError(
+            f"必要环境变量未设置: {', '.join(_MISSING)}。请在 .env 文件中配置。"
+        )

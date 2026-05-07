@@ -31,7 +31,8 @@ log_alert() {
 # 请求健康端点
 RESPONSE=$(curl -s --max-time 10 "$HEALTH_URL" 2>&1) || true
 
-if echo "$RESPONSE" | grep -q '"status":"ok"'; then
+# 使用更健壮的 JSON 解析（兼容格式化变化）
+if echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
     log_health "OK - 健康检查通过"
     # 重置失败计数
     rm -f "$FAILURE_COUNTER_FILE"

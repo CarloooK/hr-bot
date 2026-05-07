@@ -4,6 +4,57 @@
 
 ---
 
+## 新用户快速上手
+
+### 从 GitHub 克隆后
+
+```bash
+# 1. 创建虚拟环境 & 安装依赖
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 2. 配置凭据
+cp .env.example .env
+# 编辑 .env，填入你的：
+#   - DeepSeek API Key（从 https://platform.deepseek.com/api_keys 获取）
+#   - 钉钉 AppKey / AppSecret（从钉钉开放平台创建应用后获取）
+
+# 3. 导入 HR 文档到 docs/ 目录
+#   支持格式：.pdf（文字型）, .docx
+
+# 4. 预处理并索引
+python preprocess.py    # PDF/DOCX → Markdown
+python ingest.py        # 建立向量索引
+
+# 5. 启动服务
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+
+# 6. 验证
+curl http://localhost:8000/health
+# → {"status":"ok","service":"hr-bot","queue_size":0}
+```
+
+### 工作流
+
+```
+新增 PDF/DOCX → python preprocess.py → python ingest.py → 重启服务
+或直接用:      ./run.sh ingest
+```
+
+> preprocess.py 将源文档转为 Markdown 存入 docs_md/，ingest.py 从 docs_md/ 读取建索引。
+> 如果 docs_md/ 不存在，ingest.py 会自动回退到直接解析 docs/ 中的源文件。
+
+### 所需凭据
+
+| 凭据 | 用途 | 获取方式 |
+|------|------|---------|
+| DEEPSEEK_API_KEY | LLM 问答 | https://platform.deepseek.com/api_keys |
+| DINGTALK_APP_KEY | 钉钉机器人 | 钉钉开放平台 → 企业内部应用 |
+| DINGTALK_APP_SECRET | 钉钉机器人 | 同上 |
+
+---
+
 ## 快速参考
 
 | 操作 | 命令 |

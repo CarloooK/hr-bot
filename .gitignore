@@ -4,3 +4,9 @@ __pycache__/
 .env
 logs/
 db/
+.gitnexus
+.claude/
+AGENTS.md
+CLAUDE.md
+# 预处理产物（由 preprocess.py 从 docs/ 生成）
+docs_md/

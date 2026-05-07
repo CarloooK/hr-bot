@@ -1,32 +1,31 @@
 """
-文档处理流水线（增量模式）：解析 PDF/Word/Markdown → 分块 → ChromaDB（内置 ONNX embedding）
+文档处理流水线（增量模式）：从 docs_md/ 读取预处理的 Markdown → 分块 → ChromaDB
 
-增量逻辑：
-- 维护文件清单（.ingest_manifest.json），记录每个源文件的 SHA256 hash
-- 新增文件 → 解析并存入
-- 内容变更文件 → 删除旧 chunk → 重新解析并存入
-- 已删除文件 → 清除对应 chunk
-- 未变更文件 → 跳过
+工作流：
+  新增源文件 (PDF/DOCX) → python preprocess.py (转 .md) → python ingest.py (索引)
+  ingest 只从 docs_md/ 读取 .md，纯文本解析，极快。
 
-Embedding 由 embedding_fn.py 的 MiniLMEmbeddingFunction（onnxruntime）自动处理，零 PyTorch 内存开销。
+如果 docs_md/ 不存在，自动 fallback 到 docs/ 原始流程（PDF/Word 直接解析）作为兼容。
+
+Embedding 由 embedding_fn.py 的 MiniLMEmbeddingFunction（onnxruntime）自动处理。
 """
+
 import json
 import hashlib
 import os
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Callable
 
 import chromadb
-from pypdf import PdfReader
-from docx import Document
 
 from embedding_fn import MiniLMEmbeddingFunction
 from topic_registry import register_pdf, remove_unregistered
 
 from config import (
-    DOCS_DIR, CHROMA_DB_DIR, COLLECTION_NAME,
+    DOCS_DIR, DOCS_MD_DIR, CHROMA_DB_DIR, COLLECTION_NAME,
     CHUNK_SIZE, CHUNK_OVERLAP,
 )
 
@@ -37,8 +36,21 @@ MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "db", ".ingest_manifest.
 
 # ── 文本提取器 ─────────────────────────────────────────────
 
+def extract_text_from_md(path: str) -> List[dict]:
+    """读取 .md 文件为全文（保留 Markdown 结构文本，清理控制字符）"""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    text = text.strip()
+    # 清理不可见控制字符（如 \f 换页符），保留标准空白
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    if text:
+        return [{"text": text, "page": 1}]
+    return []
+
+
 def extract_text_from_pdf(path: str) -> List[dict]:
-    """提取 PDF 文字（pypdf 直接提取）"""
+    """提取 PDF 文字（pypdf）—— fallback 模式用"""
+    from pypdf import PdfReader
     reader = PdfReader(path)
     pages = []
     for i, page in enumerate(reader.pages):
@@ -51,6 +63,8 @@ def extract_text_from_pdf(path: str) -> List[dict]:
 
 
 def extract_text_from_docx(path: str) -> List[dict]:
+    """提取 Word 文字—— fallback 模式用"""
+    from docx import Document
     doc = Document(path)
     full_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
     if full_text.strip():
@@ -58,31 +72,24 @@ def extract_text_from_docx(path: str) -> List[dict]:
     return []
 
 
-def extract_text_from_md(path: str) -> List[dict]:
-    """提取 Markdown 文本，去除标记语法保留纯内容"""
-    import re
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    text = re.sub(r"`[^`]+`", "", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    text = re.sub(r"!\[.*?\]\(.*?\)", "", text)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"^---+\s*$", "", text, flags=re.MULTILINE)
-    text = text.strip()
-    if text:
-        return [{"text": text, "page": 1}]
-    return []
+# ── 模式选择 ────────────────────────────────────────────────
 
-
-SUPPORTED_EXTENSIONS: dict[str, Callable] = {
-    ".pdf": extract_text_from_pdf,
-    ".PDF": extract_text_from_pdf,
-    ".docx": extract_text_from_docx,
-    ".DOCX": extract_text_from_docx,
-    ".md": extract_text_from_md,
-    ".MD": extract_text_from_md,
-}
+def _detect_mode() -> tuple[str, dict[str, Callable], str]:
+    """
+    自动选择工作模式：
+    - docs_md/ 存在 → MODE_MD (只处理 .md)
+    - docs_md/ 不存在 → MODE_FALLBACK (docs/ 原始模式)
+    """
+    if os.path.isdir(DOCS_MD_DIR):
+        ext_map = {".md": extract_text_from_md, ".MD": extract_text_from_md}
+        return "MODE_MD", ext_map, DOCS_MD_DIR
+    else:
+        ext_map = {
+            ".pdf": extract_text_from_pdf, ".PDF": extract_text_from_pdf,
+            ".docx": extract_text_from_docx, ".DOCX": extract_text_from_docx,
+            ".md": extract_text_from_md, ".MD": extract_text_from_md,
+        }
+        return "MODE_FALLBACK", ext_map, DOCS_DIR
 
 
 # ── 分块 ──────────────────────────────────────────────────
@@ -135,12 +142,13 @@ def save_manifest(manifest: dict):
     logger.info("清单已更新 (%d 个文件)", len(manifest))
 
 
-def scan_doc_dir() -> dict[str, Path]:
-    doc_dir = Path(DOCS_DIR)
+def scan_doc_dir(mode: str, ext_map: dict, base_dir: str) -> dict[str, Path]:
+    """扫描指定目录下的支持文件"""
+    doc_dir = Path(base_dir)
     if not doc_dir.exists():
         return {}
     files = {}
-    for ext in SUPPORTED_EXTENSIONS:
+    for ext in ext_map:
         for fp in doc_dir.glob(f"*{ext}"):
             files[fp.name] = fp
     return files
@@ -149,7 +157,6 @@ def scan_doc_dir() -> dict[str, Path]:
 # ── ChromaDB 操作 ─────────────────────────────────────────
 
 def get_or_create_collection(client):
-    """获取或创建 collection，使用自定义 ONNX embedding 函数。"""
     embedding_fn = MiniLMEmbeddingFunction()
     try:
         return client.get_collection(
@@ -176,10 +183,10 @@ def delete_file_chunks(collection, source_name: str) -> bool:
         return False
 
 
-def process_file(fp: Path, collection) -> int:
-    """解析单个文件 → 分块 → 存入 ChromaDB（自动计算 embedding）"""
+def process_file(fp: Path, collection, ext_map: dict, mode: str) -> int:
+    """解析单个文件 → 分块 → 存入 ChromaDB"""
     ext = fp.suffix
-    extractor = SUPPORTED_EXTENSIONS.get(ext)
+    extractor = ext_map.get(ext)
     if not extractor:
         logger.warning("不支持的文件格式: %s", ext)
         return 0
@@ -190,45 +197,47 @@ def process_file(fp: Path, collection) -> int:
         logger.info("  文件内容为空: %s", source_name)
         return 0
 
-    # 检测是否为截图型 PDF（文字稀疏）
-    total_chars = sum(len(p.get("text", "")) for p in pages)
-    avg_chars = total_chars / max(len(pages), 1)
-    if avg_chars < 80:
-        logger.info(
-            "  截图型 PDF (avg %.0f 字符/页): %s → 注册主题引用，跳过 ChromaDB 索引",
-            avg_chars, source_name,
-        )
-        register_pdf(source_name, pages, avg_chars)
-        # 从 manifest 中清理旧记录（如果有）
-        return 0  # 不索引到 ChromaDB
+    # --- MODE_FALLBACK: 截图型 PDF 检测（原始 docs/ 模式） ---
+    if mode == "MODE_FALLBACK":
+        total_chars = sum(len(p.get("text", "")) for p in pages)
+        avg_chars = total_chars / max(len(pages), 1)
+        if avg_chars < 80:
+            logger.info(
+                "  截图型 PDF (avg %.0f 字符/页): %s → 注册主题引用，跳过 ChromaDB 索引",
+                avg_chars, source_name,
+            )
+            register_pdf(source_name, pages, avg_chars)
+            return 0
 
-    # 策略：将所有页面文本拼接成完整文档 → 统一分块（跨页内容自然连接，保留章节连续性）
-    # 先建立字符偏移 → 页码的映射
-    full_text = ""
-    page_map = []  # (char_start, char_end, page_number)
-    for p in pages:
-        text = p.get("text", "")
-        if not text:
-            continue
-        start = len(full_text)
-        if full_text:
-            full_text += "\n"
+    # --- MODE_MD: 全文作为单页（预处理后的 .md 不分页） ---
+    # --- MODE_FALLBACK: 拼接全文本 + 分页映射 ---
+    if mode == "MODE_MD":
+        text = pages[0]["text"]
+        chunks = chunk_text(text, page=1, source=source_name)
+    else:
+        full_text = ""
+        page_map = []
+        for p in pages:
+            text = p.get("text", "")
+            if not text:
+                continue
             start = len(full_text)
-        full_text += text
-        page_map.append((start, len(full_text), p["page"]))
+            if full_text:
+                full_text += "\n"
+                start = len(full_text)
+            full_text += text
+            page_map.append((start, len(full_text), p["page"]))
 
-    chunks = chunk_text(full_text, page=0, source=source_name)
-    # 为每个 chunk 计算对应的页码（取 chunk 位置所在页）
-    for c in chunks:
-        # 找 chunk 起始位置落在哪一页
-        c_start_index = full_text.find(c["text"])
-        if c_start_index >= 0:
-            for ps, pe, pn in page_map:
-                if ps <= c_start_index < pe:
-                    c["metadata"]["page"] = pn
-                    break
-        else:
-            c["metadata"]["page"] = 0  # fallback
+        chunks = chunk_text(full_text, page=0, source=source_name)
+        for c in chunks:
+            c_start_index = full_text.find(c["text"])
+            if c_start_index >= 0:
+                for ps, pe, pn in page_map:
+                    if ps <= c_start_index < pe:
+                        c["metadata"]["page"] = pn
+                        break
+            else:
+                c["metadata"]["page"] = 0
 
     if not chunks:
         return 0
@@ -244,7 +253,6 @@ def process_file(fp: Path, collection) -> int:
         metadatas = [c["metadata"] for c in batch]
         batch_ids = [f"{source_name}_chunk_{c['metadata']['chunk_index']}" for c in batch]
 
-        # 不传 embeddings，ChromaDB 会自动用内置模型计算
         collection.add(
             documents=texts,
             metadatas=metadatas,
@@ -264,13 +272,19 @@ def run():
     )
     logger.info("═" * 50)
     logger.info("  增量文档处理开始（onnxruntime embedding）")
+
+    mode, ext_map, base_dir = _detect_mode()
+    if mode == "MODE_MD":
+        logger.info("  模式: Markdown 预处理模式 ← docs_md/")
+    else:
+        logger.info("  模式: 兼容模式 (直接解析 PDF/Word) ← docs/")
     logger.info("═" * 50)
 
     manifest = load_manifest()
-    current_files = scan_doc_dir()
+    current_files = scan_doc_dir(mode, ext_map, base_dir)
 
     if not current_files:
-        logger.warning("docs/ 目录为空或不存在，请先放入 PDF / Word / Markdown 文件")
+        logger.warning("%s 目录为空或不存在，请先放入文档", base_dir)
         return
 
     new_or_changed: list[tuple[str, Path, str]] = []
@@ -305,13 +319,14 @@ def run():
         delete_file_chunks(collection, fname)
         del manifest[fname]
 
-    # 清理截图型 PDF 注册表中已删除的文件
-    remove_unregistered(set(current_files.keys()))
+    # MODE_FALLBACK: 清理截图型 PDF 注册表中已删除的文件
+    if mode == "MODE_FALLBACK":
+        remove_unregistered(set(current_files.keys()))
 
     total_chunks = 0
     for fname, fp, reason in new_or_changed:
         try:
-            count = process_file(fp, collection)
+            count = process_file(fp, collection, ext_map, mode)
             if count > 0:
                 manifest[fname] = {
                     "hash": compute_file_hash(str(fp)),

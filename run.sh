@@ -24,14 +24,26 @@ if [ -f .env ]; then
     set +a
 fi
 
+_ensure_index() {
+    # 如果有 preprocess.py，先预处理再索引
+    if [ -f preprocess.py ]; then
+        echo "🔄 预处理源文档 (PDF/DOCX → Markdown)..."
+        python preprocess.py
+    fi
+    echo "📄 索引文档..."
+    python ingest.py
+}
+
 case "${1:-}" in
+    preprocess)
+        echo "🔄 预处理源文档 (PDF/DOCX → Markdown)..."
+        python preprocess.py
+        ;;
     ingest)
-        echo "📄 重新索引文档..."
-        python ingest.py
+        _ensure_index
         ;;
     dev)
-        echo "📄 确保文档已索引..."
-        python ingest.py
+        _ensure_index
         echo "🚀 启动服务（开发模式 + ngrok）..."
         python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
         SERVER_PID=$!
@@ -48,8 +60,7 @@ case "${1:-}" in
         wait
         ;;
     *)
-        echo "📄 确保文档已索引..."
-        python ingest.py
+        _ensure_index
         echo "🚀 启动服务..."
         python -m uvicorn main:app --host 0.0.0.0 --port 8000
         ;;

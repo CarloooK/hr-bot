@@ -2,6 +2,7 @@
 RAG 问答引擎：ChromaDB 检索 → DeepSeek Chat API 生成回答
 Embedding 由 embedding_fn.py 的 MiniLMEmbeddingFunction（onnxruntime）处理。
 """
+
 import logging
 import time
 
@@ -84,8 +85,68 @@ def _expand_query(query: str) -> str:
     return expanded
 
 
+# ── 话题增强配置 ──────────────────────────────────────────
+# 当问及特定关键词时，强制注入来自指定文档指定页的内容
+_BOOST_PAGES: dict[str, list[int]] = {
+    "福利": [2, 4, 5],
+    "薪酬": [2, 4, 5],
+    "饭贴": [2],
+    "薪资": [4, 5],
+}
+
+
+def _find_boost_chunks(query: str) -> list[str]:
+    """话题增强：从指定 PDF 的指定页面强制摘取补充片段"""
+    boost_pages = None
+    for keyword, pages in _BOOST_PAGES.items():
+        if keyword in query:
+            boost_pages = pages
+            break
+    if not boost_pages:
+        return []
+
+    collection = get_collection()
+    if collection is None:
+        return []
+
+    # 先找到目标文档的所有 chunks
+    try:
+        all_data = collection.get()
+    except Exception:
+        return []
+
+    sources = set()
+    target_source = None
+    for meta in (all_data.get("metadatas") or []):
+        if meta and "新员工常见问题答疑" in meta.get("source", ""):
+            target_source = meta["source"]
+            break
+    if not target_source:
+        return []
+
+    try:
+        src_data = collection.get(where={"source": target_source})
+    except Exception:
+        return []
+
+    extra = []
+    for doc, meta in zip(src_data.get("documents") or [], src_data.get("metadatas") or []):
+        p = meta.get("page", 0) if meta else 0
+        if p in boost_pages and len(doc or "") > 50:
+            label = f"[来源：{target_source} 第{p}页 - 附]"
+            extra.append(f"{label}\n{doc}\n")
+    return extra
+
+
+# ── 主检索 ────────────────────────────────────────────────
+
 def retrieve(query: str, top_k: int = TOP_K) -> str:
-    """检索相关文档片段（每个文档单独检索取 N 条，再轮询合并）"""
+    """
+    检索相关文档片段。
+    
+    策略：一次全局查询取 top_k*3 条 → 按 source 轮询精选 top_k 条
+    相比原来的"每个文档独立查30条再轮询"，减少 N-1 次 embedding 推理。
+    """
     collection = get_collection()
     if collection is None:
         return "（暂无已索引的文档）"
@@ -95,78 +156,64 @@ def retrieve(query: str, top_k: int = TOP_K) -> str:
     if query_text != query:
         logger.info("查询扩展: %s → %s", query, query_text)
 
-    # 获取所有来源文档列表
+    # 一次全局查询
+    n_results = top_k * 3
     try:
-        all_data = collection.get()
-        sources = sorted(set(m.get("source", "未知") for m in all_data["metadatas"]))
-    except Exception:
-        sources = []
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=n_results,
+        )
+    except Exception as e:
+        logger.warning("全局查询失败: %s，尝试较小结果集", e)
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=top_k,
+        )
 
-    if not sources:
-        # 兜底：全局查询
-        results = collection.query(query_texts=[query_text], n_results=top_k)
-        if not results["documents"] or not results["documents"][0]:
-            return "（未找到相关文档内容）"
-    else:
-        # 每个文档独立检索，各取 30 条确保覆盖率（有些文档含饭贴/精微币的 chunk 排名靠后）
-        per_source_chunks: dict[str, list[tuple[str, dict]]] = {}
-        for source in sources:
-            try:
-                r = collection.query(
-                    query_texts=[query_text],
-                    n_results=min(30, collection.count()),
-                    where={"source": source},
-                )
-                if r["documents"] and r["documents"][0]:
-                    for doc, meta in zip(r["documents"][0], r["metadatas"][0]):
-                        if source not in per_source_chunks:
-                            per_source_chunks[source] = []
-                        per_source_chunks[source].append((doc, meta))
-            except Exception:
-                continue
+    if not results.get("documents") or not results["documents"][0]:
+        return "（未找到相关文档内容）"
 
-    # 轮询合并
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+    distances = results.get("distances", [[]])[0] if results.get("distances") else None
+
+    # 按 source 分组（保留原始排序，即相似度顺序）
+    per_source: dict[str, list[tuple[str, dict, float]]] = {}
+    for i, doc in enumerate(docs):
+        meta = metas[i] if i < len(metas) else {}
+        source = meta.get("source", "未知") if meta else "未知"
+        dist = distances[i] if distances else 0.0
+        if source not in per_source:
+            per_source[source] = []
+        per_source[source].append((doc, meta, dist))
+
+    # 轮询合并：每个来源轮流出 1 条，按原始相似度排序
     context_parts = []
-    pool = list(per_source_chunks.keys())
+    pool = list(per_source.keys())
     idx = 0
     while len(context_parts) < top_k:
-        remaining = [s for s in pool if idx < len(per_source_chunks[s])]
+        remaining = [s for s in pool if idx < len(per_source[s])]
         if not remaining:
             break
         for source in remaining:
-            doc, meta = per_source_chunks[source][idx]
+            doc, meta, _ = per_source[source][idx]
             page = meta.get("page", "?")
             context_parts.append(f"[来源：{source} 第{page}页]\n{doc}\n")
             if len(context_parts) >= top_k:
                 break
         idx += 1
 
-    # ── 话题增强：为"福利"话题补充 MiniLM 语义覆盖不到的具体内容 ──
-    _BOOST_PAGES: dict[str, list[int]] = {
-        "福利": [2, 4, 5],
-        "薪酬": [2, 4, 5],
-        "饭贴": [2],
-        "薪资": [4, 5],
-    }
-    boost_pages = None
-    for keyword, pages in _BOOST_PAGES.items():
-        if keyword in query:
-            boost_pages = pages
-            break
-    if boost_pages:
-        for source in per_source_chunks:
-            if "新员工常见问题答疑" in source:
-                for doc, meta in per_source_chunks[source]:
-                    p = meta.get("page", 0)
-                    if p in boost_pages and len(doc) > 50:
-                        # 避免注入已在轮询结果或已注入的重复内容
-                        label = f"[来源：{source} 第{p}页 - 附]"
-                        already_included = any(label in c for c in context_parts)
-                        if already_included:
-                            continue
-                        boost = f"{label}\n{doc}\n"
-                        context_parts.append(boost)
-                break
+    # 话题增强
+    boost_chunks = _find_boost_chunks(query)
+    for chunk in boost_chunks:
+        label = chunk.split("\n")[0]
+        if any(label in c for c in context_parts):
+            continue
+        # 替换最后一个（如果已达 top_k）
+        if len(context_parts) >= top_k:
+            context_parts[-1] = chunk
+        else:
+            context_parts.append(chunk)
 
     return "\n".join(context_parts)
 
